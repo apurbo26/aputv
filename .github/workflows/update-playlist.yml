@@ -1,1 +1,40 @@
+name: Update Categorized M3U Playlist
 
+on:
+  schedule:
+    # প্রতি ৬ ঘণ্টা পরপর (UTC অনুযায়ী; বাংলাদেশ সময় +৬ ঘণ্টা)
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # ম্যানুয়ালি রান করার জন্য
+
+permissions:
+  contents: write
+
+jobs:
+  build-playlist:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl
+
+      - name: Generate categorized playlist
+        run: php generate_playlist.php
+
+      - name: Commit and push if playlist changed
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add playlist.m3u
+          if git diff --staged --quiet; then
+            echo "No changes in playlist.m3u"
+          else
+            git commit -m "chore: update categorized M3U playlist ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git push
+          fi
+          
