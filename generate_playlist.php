@@ -3,6 +3,7 @@
 $defaultUrl = 'https://liljnnprtqwoimmsjuhy.supabase.co/storage/v1/object/public/IPTV-Network/IPTV-NETWORK/19-11-26-Link-1_B.m3u';
 $playlistUrl = getenv('M3U_SOURCE_URL') ?: $defaultUrl;
 $outputFile = getenv('M3U_OUTPUT_FILE') ?: __DIR__ . '/playlist.m3u';
+$categoriesDir = getenv('M3U_CATEGORIES_DIR') ?: __DIR__ . '/categories';
 
 function fetchM3u(string $url): ?string {
     $ch = curl_init($url);
@@ -13,7 +14,7 @@ function fetchM3u(string $url): ?string {
         CURLOPT_TIMEOUT        => 30,
         CURLOPT_CONNECTTIMEOUT => 15,
         CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_USERAGENT      => 'Mozilla/5.0 (compatible; GitHubActionM3UCategorizer/1.0)',
+        CURLOPT_USERAGENT      => 'Mozilla/5.0 (compatible; GitHubActionM3UCategorizer/1.2)',
     ]);
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -27,14 +28,81 @@ function fetchM3u(string $url): ?string {
     return $response;
 }
 
-function detectCategory(string $extinfLine, string $streamUrl): string {
+/**
+ * categories/ ফোল্ডারের সব .txt ফাইল থেকে ক্যাটাগরি ও চ্যানেলের নাম লোড করে
+ */
+function loadCategoryFolderRules(string $categoriesDir): array {
+    $rules = [];
+    if (!is_dir($categoriesDir)) {
+        return $rules;
+    }
+
+    $files = glob(rtrim($categoriesDir, '/\\') . '/*.txt');
+    if ($files === false) {
+        return $rules;
+    }
+
+    foreach ($files as $file) {
+        $categoryName = trim(pathinfo($file, PATHINFO_FILENAME));
+        if ($categoryName === '') {
+            continue;
+        }
+
+        $lines = preg_split('/\r\n|\r|\n/', (string)file_get_contents($file));
+        $channelNames = [];
+        foreach ($lines as $line) {
+            $clean = trim($line);
+            if ($clean === '' || strpos($clean, '#') === 0) {
+                continue;
+            }
+            $channelNames[] = mb_strtolower($clean);
+        }
+
+        if (!empty($channelNames)) {
+            $rules[$categoryName] = $channelNames;
+        }
+    }
+
+    return $rules;
+}
+
+function extractExistingGroupTitle(string $extinfLine): ?string {
+    if (preg_match('/group-title="([^"]*)"/i', $extinfLine, $matches)) {
+        $group = trim($matches[1]);
+        if ($group !== '' && strcasecmp($group, 'uncategorized') !== 0 && strcasecmp($group, 'general') !== 0) {
+            return $group;
+        }
+    }
+    return null;
+}
+
+function extractChannelName(string $extinfLine): string {
     $parts = explode(',', $extinfLine, 2);
-    $channelName = $parts[1] ?? $extinfLine;
+    return trim($parts[1] ?? $extinfLine);
+}
 
-    $haystack = strtolower($channelName . ' ' . $extinfLine . ' ' . $streamUrl);
+function detectCategory(string $extinfLine, string $streamUrl, array $folderRules): string {
+    // ১. আগে থেকেই ক্যাটাগরি করা থাকলে অটোমেটিক ওই নামেই বসে যাবে
+    $existingGroup = extractExistingGroupTitle($extinfLine);
+    if ($existingGroup !== null) {
+        return $existingGroup;
+    }
 
-    // ক্রম গুরুত্বপূর্ণ: আগে ম্যাচ করলে সেটিই প্রাধান্য পাবে
-    $rules = [
+    $channelName = extractChannelName($extinfLine);
+    $nameLower = mb_strtolower($channelName);
+    $haystack = mb_strtolower($channelName . ' ' . $extinfLine . ' ' . $streamUrl);
+
+    // ২. categories/ ফোল্ডারের .txt ফাইলে দেওয়া চ্যানেলের নামের সাথে মিলিয়ে দেখবে
+    foreach ($folderRules as $category => $channelNames) {
+        foreach ($channelNames as $targetName) {
+            if ($targetName !== '' && mb_strpos($nameLower, $targetName) !== false) {
+                return $category;
+            }
+        }
+    }
+
+    // ৩. ফোল্ডারে না থাকলে ডিফল্ট keyword নিয়মে ক্যাটাগরি ঠিক করবে
+    $autoRules = [
         'Movie' => [
             'movie', 'movies', 'cinema', 'film', 'box office', 'bollywood',
             'hollywood', 'tollywood', 'bhojpuri', 'zee cinema', '&pictures',
@@ -64,9 +132,9 @@ function detectCategory(string $extinfLine, string $streamUrl): string {
         ],
     ];
 
-    foreach ($rules as $category => $keywords) {
+    foreach ($autoRules as $category => $keywords) {
         foreach ($keywords as $kw) {
-            if (strpos($haystack, strtolower($kw)) !== false) {
+            if (mb_strpos($haystack, mb_strtolower($kw)) !== false) {
                 return $category;
             }
         }
@@ -89,6 +157,7 @@ function setGroupTitle(string $extinfLine, string $category): string {
     return $extinfLine;
 }
 
+$folderRules = loadCategoryFolderRules($categoriesDir);
 $raw = fetchM3u($playlistUrl);
 if ($raw === null) {
     exit(1);
@@ -118,7 +187,7 @@ foreach ($lines as $line) {
     }
 
     if ($pendingExtinf !== null && strpos($trimmed, '#') !== 0) {
-        $category = detectCategory($pendingExtinf, $trimmed);
+        $category = detectCategory($pendingExtinf, $trimmed, $folderRules);
         $updatedExtinf = setGroupTitle($pendingExtinf, $category);
 
         $output[] = $updatedExtinf;
